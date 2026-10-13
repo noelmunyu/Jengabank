@@ -1,0 +1,125 @@
+# JengaBank Payments (APP04)
+# Every secret and connection detail comes from environment variables.
+# On the range, the database comes from the PG* variables JengaSec injects.
+
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  forward-headers-strategy: none          # src_ip = the address our app actually sees
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+    whitelabel:
+      enabled: false
+  tomcat:
+    max-http-form-post-size: 16KB  # only form-urlencoded bodies; see jengabank.security.max-request-bytes for JSON
+    max-swallow-size: 16KB
+    connection-timeout: 10s
+  max-http-request-header-size: 16KB
+
+spring:
+  application:
+    name: jengabank-payments
+  config:
+    # Local runs pick up DB_PASSWORD from ./.env. Absent in the image, so it changes nothing there.
+    import: optional:file:.env[.properties]
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+  datasource:
+    # JengaSec injects PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD; docker compose sets DB_*.
+    url: ${DB_URL:jdbc:postgresql://${PGHOST:localhost}:${PGPORT:5432}/${PGDATABASE:jengabank_payments}}
+    username: ${DB_USER:${PGUSER:jengabank}}
+    password: ${DB_PASSWORD:${PGPASSWORD:}}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 3000
+      validation-timeout: 2000
+      max-lifetime: 1200000
+      pool-name: jengabank
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    clean-disabled: true
+    validate-on-migrate: true
+    baseline-on-migrate: false
+
+  jackson:
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: true      # reject unknown fields (API rule)
+      fail-on-null-for-primitives: true
+      accept-float-as-int: false            # 12.5 is not a valid amountMinor
+
+  mvc:
+    problemdetails:
+      enabled: false                         # we use our own { code, message, requestId }
+  web:
+    resources:
+      add-mappings: true                     # serves the React app from /static
+
+springdoc:
+  api-docs:
+    path: /openapi.json
+  swagger-ui:
+    # Off in the image: no interactive console for attackers on the range.
+    # docker compose turns it on locally at /swagger-ui.html.
+    enabled: ${SWAGGER_UI_ENABLED:false}
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+    persist-authorization: false             # the token stays in memory, never in localStorage
+  show-actuator: false
+
+logging:
+  level:
+    root: INFO
+    org.springframework.security: WARN
+    org.flywaydb: INFO
+
+# Business limits (server-side, never trusted from the client). Amounts in cents.
+jengabank:
+  security:
+    # Comma-separated IPs/IPv4 CIDRs of our OWN reverse proxy/ingress, if any (e.g. "10.0.0.1" or
+    # "10.0.0.0/8"). X-Forwarded-For/X-Real-IP are only read when the TCP peer is one of these;
+    # anyone else's forwarded headers are ignored and request.getRemoteAddr() is used instead.
+    # Empty (default) = never trust them, since there's nothing in front of the container locally.
+    trusted-proxies: ${TRUSTED_PROXIES:}
+    # Team API rule: 16 KB max request size. server.tomcat.max-http-form-post-size (below)
+    # only caps application/x-www-form-urlencoded bodies, NOT our JSON API requests, so this
+    # is the limit that actually applies to every endpoint (see RequestSizeLimitFilter).
+    max-request-bytes: 16384
+    # Organiser rule: rate limit expensive/search/export operations too, not just auth.
+    account-entries-rate-per-minute: 30
+  limits:
+    max-per-transfer-minor: 100000000        # KES 1,000,000
+    daily-total-minor: 200000000             # KES 2,000,000 per customer per day
+    velocity-max-transfers: 5                # per user...
+    velocity-window-seconds: 60              # ...per minute
+  approval:
+    threshold-minor: 25000000                # KES 250,000 and above needs a checker
+  fraud:
+    zone: Africa/Nairobi                     # odd-hours rule uses local time
+    odd-hour-start: 23                       # 23:00-05:00 goes to review; start == end disables it
+    odd-hour-end: 5
+    large-amount-new-payee-minor: 10000000   # KES 100,000+ to someone you've never paid: review
+    structuring-ratio: 0.95                  # within 5% under the per-transfer cap: review
+    max-blocked-transfers-24h: 3             # this many blocked attempts in 24h: block the next
+  auth:
+    max-failed-logins: 5
+    lockout-minutes: 15
+    token-ttl-minutes: 30
+  reconciliation:
+    cron: "0 0 23 * * *"                     # 23:00 every day
+    zone: Africa/Nairobi

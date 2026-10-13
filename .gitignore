@@ -1,0 +1,25 @@
+
+# Dev 3 local artifacts
+.idea/
+*.log
+mvn-output.log
+mvn-test.log
+target/
+200
+# Maven
+target/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Local secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Local-only documents
+docs/PROPOSAL-v2.docx
